@@ -1,264 +1,147 @@
-import json  
-from Trabalho import DB  
-from Trabalho import Modelo
+import json
+import os
+import re
+from typing import Optional
 
-class CorretorModelo():
-    def __init__(self, banco):
-        self.banco = banco
 
+# ======================================================
+#  CLASSE REGRA
+# ======================================================
+class Regra:
+    def __init__(self, nome: str, descricao: str, func):
+        self.nome = nome
+        self.descricao = descricao
+        self.func = func  # função que avalia a regra
+
+    def aplicar(self, texto: str):
+        """Executa a função da regra e retorna (status, comentario)."""
+        try:
+            return self.func(texto)
+        except Exception as e:
+            return ("erro", f"Erro ao aplicar regra '{self.nome}': {str(e)}")
+
+
+# ======================================================
+#  CORRETOR
+# ======================================================
+class CorretorRedacao:
+    def __init__(self, db: Optional[object] = None):
+        self.db = db
+        self.modelos_file = "modelos.json"
+        self.regras = self._criar_regras_em_memoria()
+
+        if not os.path.exists(self.modelos_file):
+            self.salvar_modelos([])
+
+        try:
+            self.carregar_modelos()
+        except Exception:
+            self.salvar_modelos([])
+
+    # ====================== MODELOS ======================
     def carregar_modelos(self):
-        modelos = []
-        consulta = "SELECT * FROM modelos"
-        resultados = self.banco.cursor.execute(consulta).fetchall()
-        for linha in resultados:
-            modelo = Modelo(
-                id=linha['id'],
-                nome=linha['nome'],
-                descricao=linha['descricao'],
-                json_data=json.loads(linha['json_data'])
-            )
-            modelos.append(modelo)
-        return modelos
+        with open(self.modelos_file, "r", encoding="utf-8") as f:
+            data = f.read().strip()
+            if data == "":
+                return []
+            return json.loads(data)
 
-    def analisar_redacao(self, redacao_texto, modelo_id):
-        modelo = self.banco.buscar_modelo_por_id(modelo_id)
-        if not modelo:
-            raise ValueError("Modelo não encontrado")
-        
-        regras = self.banco.listar_regras()
-        comentarios = self.aplicar_regras(redacao_texto, regras)
-        return comentarios
+    def salvar_modelos(self, modelos):
+        with open(self.modelos_file, "w", encoding="utf-8") as f:
+            json.dump(modelos, f, indent=4, ensure_ascii=False)
 
-    def aplicar_regras(self, redacao_texto, regras):
-        comentarios = []
-        texto_lower = redacao_texto.lower()
+    def criar_modelo(self, nome: str, descricao: str):
+        modelos = self.carregar_modelos()
+        novo_id = 1 if not modelos else max(m["id"] for m in modelos) + 1
+        modelo = {"id": novo_id, "nome": nome, "descricao": descricao}
+        modelos.append(modelo)
+        self.salvar_modelos(modelos)
+        return novo_id
 
-        for regra in regras:
-            if regra.nome == "Tamanho mínimo":
-                minimo = regra.json_data.get('min_palavras', 0)
-                qtd = len(redacao_texto.split())
-                if qtd < minimo:
-                    comentarios.append({
-                        "regra": regra.nome,
-                        "comentario": f"A redação possui {qtd} palavras, o mínimo exigido é {minimo}."
-                    })
-                else:
-                    comentarios.append({
-                        "regra": regra.nome,
-                        "status": "ok",
-                        "comentario": regra.json_data.get("mensagem_ok", "Tamanho mínimo adequado.")
-                    })
+    # ====================== REGRAS ======================
+    def _criar_regras_em_memoria(self):
+        def r_norma(texto: str):
+            if re.search(r"[^a-zA-Z0-9\s.,;:!?()\-áéíóúâêôãõçÁÉÍÓÚÂÊÔÃÕÇ\"'ªº%€$ººº\[\]]", texto):
+                return ("erro", "Foram encontrados caracteres incomuns que sugerem erro de escrita.")
+            return ("ok", "Bom domínio da norma-padrão.")
 
-            elif regra.nome == "Uso da 1ª pessoa":
-                proibidos = regra.json_data.get('proibidos', [])
-                encontrados = [p for p in proibidos if p in texto_lower]
-                if encontrados:
-                    comentarios.append({
-                        "regra": regra.nome,
-                        "comentario": f"Uso inadequado da 1ª pessoa: {', '.join(encontrados)}."
-                    })
-                else:
-                    comentarios.append({
-                        "regra": regra.nome,
-                        "status": "ok",
-                        "comentario": regra.json_data.get("mensagem_ok", "Não há uso da 1ª pessoa.")
-                    })
+        def r_tema(texto: str):
+            if len(texto.split()) < 30:
+                return ("erro", "O texto é curto; pode não estar desenvolvendo o tema.")
+            return ("ok", "O texto parece tratar do tema de forma inicial.")
 
-            elif regra.nome == "Proposta de intervenção":
-                itens = regra.json_data.get("itens_necessarios", [])
-                faltando = [i for i in itens if i not in texto_lower]
-                if faltando:
-                    comentarios.append({
-                        "regra": regra.nome,
-                        "comentario": f"Faltam itens na proposta de intervenção: {', '.join(faltando)}."
-                    })
-                else:
-                    comentarios.append({
-                        "regra": regra.nome,
-                        "status": "ok",
-                        "comentario": regra.json_data.get("mensagem_ok", "Proposta de intervenção adequada.")
-                    })
+        def r_argumentos(texto: str):
+            argumentos = len(re.findall(r"\b(portanto|logo|pois|assim|desse modo|por isso|consequentemente)\b", texto.lower()))
+            if argumentos < 1:
+                return ("erro", "Poucos conectores argumentativos (pouca articulação de argumentos).")
+            return ("ok", "Há presença de conectores argumentativos.")
 
-            elif regra.nome == "Pertinência dos argumentos":
-                palavras_chave = regra.json_data.get('palavras_chave', ["porque", "portanto", "logo", "assim", "pois"])
-                minimo_argumentos = regra.json_data.get('minimo_argumentos', 1)
-                contagem = sum(texto_lower.count(p) for p in palavras_chave)
-                if contagem < minimo_argumentos:
-                    comentarios.append({
-                        "regra": regra.nome,
-                        "comentario": f"Faltam argumentos suficientes, apenas {contagem} detectado(s)."
-                    })
-                else:
-                    comentarios.append({
-                        "regra": regra.nome,
-                        "status": "ok",
-                        "comentario": regra.json_data.get("mensagem_ok", "Argumentação adequada.")
-                    })
+        def r_conectivos(texto: str):
+            conectivos = len(re.findall(r"\b(e|mas|porém|entretanto|assim|além disso|portanto)\b", texto.lower()))
+            if conectivos < 1:
+                return ("erro", "Pouca utilização de conectivos para garantir coesão textual.")
+            return ("ok", "Uso adequado de conectivos.")
 
-            elif regra.nome == "Coesão textual":
-                conectivos = regra.json_data.get('conectivos', ["além disso", "portanto", "logo", "assim", "por outro lado", "no entanto", "entretanto"])
-                conectivos_minimos = regra.json_data.get('conectivos_minimos', 0)
-                contagem_conectivos = sum(texto_lower.count(c) for c in conectivos)
-                if contagem_conectivos < conectivos_minimos:
-                    comentarios.append({
-                        "regra": regra.nome,
-                        "comentario": f"Faltam conectivos adequados, apenas {contagem_conectivos} detectado(s)."
-                    })
-                else:
-                    comentarios.append({
-                        "regra": regra.nome,
-                        "status": "ok",
-                        "comentario": regra.json_data.get("mensagem_ok", "Coesão textual adequada.")
-                    })
+        def r_tamanho(texto: str):
+            palavras = len(texto.split())
+            if palavras < 120:
+                return ("erro", f"Texto curto: {palavras} palavras (mínimo recomendado: 120).")
+            return ("ok", "Tamanho adequado conforme critério mínimo.")
 
-            elif regra.nome == "Domínio da norma-padrão":
-                comentarios.append({
-                    "regra": regra.nome,
-                    "status": "ok",
-                    "comentario": regra.json_data.get("mensagem_ok", "Domínio da norma-padrão adequado.")
-                })
+        def r_primeira_pessoa(texto: str):
+            if re.search(r"\b(eu|minha|meu|acho|penso)\b", texto.lower()):
+                return ("erro", "Uso de 1ª pessoa identificado (evitar em dissertativo-argumentativo).")
+            return ("ok", "Não há marcas claras de 1ª pessoa.")
 
-            elif regra.nome == "Estrutura dissertativo-argumentativa":
-                comentarios.append({
-                    "regra": regra.nome,
-                    "status": "ok",
-                    "comentario": regra.json_data.get("mensagem_ok", "Estrutura dissertativo-argumentativa adequada.")
-                })
-
-            elif regra.nome == "Repetição vocabular":
-                limite = regra.json_data.get('limite_repeticoes', 5)
-                palavras = texto_lower.split()
-                repeticoes = {p: palavras.count(p) for p in set(palavras) if palavras.count(p) > limite}
-                if repeticoes:
-                    comentarios.append({
-                        "regra": regra.nome,
-                        "comentario": f"Repetição excessiva: {', '.join(repeticoes.keys())}."
-                    })
-                else:
-                    comentarios.append({
-                        "regra": regra.nome,
-                        "status": "ok",
-                        "comentario": regra.json_data.get("mensagem_ok", "Vocabulário adequado.")
-                    })
-
-            elif regra.nome == "Referenciação":
-                comentarios.append({
-                    "regra": regra.nome,
-                    "status": "ok",
-                    "comentario": regra.json_data.get("mensagem_ok", "Referenciação adequada.")
-                })
-
-            elif regra.nome == "Adequação ao tema":
-                palavras_chave = regra.json_data.get("palavras_chave", [])
-                faltando = [p for p in palavras_chave if p not in texto_lower]
-                if faltando:
-                    comentarios.append({
-                        "regra": regra.nome,
-                        "comentario": f"Faltam palavras-chave do tema: {', '.join(faltando)}."
-                    })
-                else:
-                    comentarios.append({
-                        "regra": regra.nome,
-                        "status": "ok",
-                        "comentario": regra.json_data.get("mensagem_ok", "Tema adequado.")
-                    })
-
-        return comentarios
-
-    def popular_regras_padrao(self):
         regras = [
-            {
-                "nome": "Domínio da norma-padrão",
-                "descricao": "Avalia desvios gramaticais, ortográficos, de concordância, regência e pontuação.",
-                "json_data": {
-                    "tipos_erros": ["acentuação", "pontuação", "concordância", "regência", "ortografia"],
-                    "mensagem_ok": "A redação demonstra bom domínio da norma-padrão da língua portuguesa.",
-                    "mensagem_erro": "Foram identificados desvios em relação à norma-padrão, comprometendo a correção gramatical."
-                }
-            },
-            {
-                "nome": "Adequação ao tema",
-                "descricao": "Verifica se o texto aborda o tema proposto.",
-                "json_data": {
-                    "palavras_chave": [],
-                    "mensagem_ok": "O texto desenvolve o tema proposto de maneira adequada.",
-                    "mensagem_fuga": "Desenvolvimento tangencial ou fuga parcial ao tema.",
-                    "mensagem_fuga_total": "Fuga total ao tema. O texto não atende ao propósito solicitado."
-                }
-            },
-            {
-                "nome": "Estrutura dissertativo-argumentativa",
-                "descricao": "Confere se há introdução, desenvolvimento e conclusão com progressão.",
-                "json_data": {
-                    "mensagem_ok": "O texto apresenta estrutura dissertativo-argumentativa adequada.",
-                    "mensagem_erro": "Ausência de elementos essenciais à estrutura dissertativa."
-                }
-            },
-            {
-                "nome": "Pertinência dos argumentos",
-                "descricao": "Avalia consistência e relevância dos argumentos apresentados.",
-                "json_data": {
-                    "mensagem_ok": "Argumentos consistentes e bem relacionados à tese.",
-                    "mensagem_erro": "Argumentação insuficiente, repetitiva ou desconexa.",
-                    "palavras_chave": ["porque", "portanto", "logo", "assim", "pois"],
-                    "minimo_argumentos": 1
-                }
-            },
-            {
-                "nome": "Coesão textual",
-                "descricao": "Analisa uso de conectivos e mecanismos de articulação textual.",
-                "json_data": {
-                    "conectivos_minimos": 3,
-                    "mensagem_ok": "Há boa articulação entre as partes do texto.",
-                    "mensagem_erro": "Faltam conectores adequados, prejudicando a progressão das ideias."
-                }
-            },
-            {
-                "nome": "Repetição vocabular",
-                "descricao": "Detecta repetição excessiva de termos que prejudicam a fluidez.",
-                "json_data": {
-                    "limite_repeticoes": 5,
-                    "mensagem_ok": "O vocabulário apresenta variedade e precisão.",
-                    "mensagem_erro": "Repetição vocabular compromete a clareza do texto."
-                }
-            },
-            {
-                "nome": "Referenciação",
-                "descricao": "Verifica se pronomes e substituições ajudam a manter coesão referencial.",
-                "json_data": {
-                    "mensagem_ok": "Mecanismos de coesão referencial bem utilizados.",
-                    "mensagem_erro": "Problemas de referenciação prejudicam a progressão textual."
-                }
-            },
-            {
-                "nome": "Proposta de intervenção",
-                "descricao": "Avalia se a proposta possui agente, ação, meio, efeito e detalhamento.",
-                "json_data": {
-                    "itens_necessarios": ["agente", "acao", "meio", "efeito", "detalhamento"],
-                    "mensagem_ok": "A proposta de intervenção é completa, coerente e detalhada.",
-                    "mensagem_incompleta": "A proposta de intervenção está presente, porém incompleta.",
-                    "mensagem_ausente": "Ausência de proposta de intervenção relacionada ao tema."
-                }
-            },
-            {
-                "nome": "Tamanho mínimo",
-                "descricao": "Verifica se o texto possui quantidade mínima de palavras.",
-                "json_data": {
-                    "min_palavras": 120,
-                    "mensagem_ok": "A extensão do texto é adequada.",
-                    "mensagem_erro": "Texto com extensão insuficiente para avaliação."
-                }
-            },
-            {
-                "nome": "Uso da 1ª pessoa",
-                "descricao": "Detecta marcas de subjetividade inadequadas ao gênero dissertativo.",
-                "json_data": {
-                    "proibidos": ["eu", "meu", "minha", "acho", "acredito"],
-                    "mensagem_ok": "Não há marcas de 1ª pessoa.",
-                    "mensagem_erro": "Uso inadequado da 1ª pessoa compromete a formalidade do gênero."
-                }
-            }
+            Regra("Norma-padrão", "Avalia uso formal da escrita.", r_norma),
+            Regra("Adequação ao tema", "Verifica cobertura do tema.", r_tema),
+            Regra("Pertinência dos argumentos", "Identifica conectores argumentativos.", r_argumentos),
+            Regra("Coesão textual", "Analisa uso de conectivos.", r_conectivos),
+            Regra("Tamanho mínimo", "Verifica se há ao menos 120 palavras.", r_tamanho),
+            Regra("Uso da 1ª pessoa", "Garantir impessoalidade do texto.", r_primeira_pessoa),
         ]
+        return regras
 
-        for r in regras:
-            self.banco.inserir_regra(r["nome"], r["descricao"], r["json_data"])
+    # ====================== POPULAR REGRAS NO DB ======================
+    def popular_regras_padrao(self):
+        if not self.db:
+            raise RuntimeError("Nenhuma instância de DB fornecida ao corretor.")
+        cur = self.db._execute("SELECT COUNT(*) as c FROM regras")
+        if cur:
+            c = cur.fetchone()['c']
+            if c > 0:
+                return
+        for regra in self.regras:
+            try:
+                self.db.inserir_regra(regra.nome, regra.descricao, {})
+            except Exception:
+                pass
+
+    # ====================== ANÁLISE COM PONTOS ======================
+    def analisar_redacao(self, texto: str, modelo_id: Optional[int] = None):
+        feedback = []
+        total = 0
+        max_total = len(self.regras) * 10  # cada regra vale 10 pontos
+
+        for regra in self.regras:
+            status, comentario = regra.aplicar(texto)
+            pontos = 10 if status == "ok" else 0
+            total += pontos
+            feedback.append({
+                "regra": regra.nome,
+                "status": status,
+                "comentario": comentario,
+                "pontos": pontos,
+                "max": 10
+            })
+
+        # resumo final
+        feedback.append({
+            "resumo": True,
+            "total_pontos": total,
+            "total_max": max_total,
+            "nota_final": round((total / max_total) * 10, 2)
+        })
+
+        return feedback
